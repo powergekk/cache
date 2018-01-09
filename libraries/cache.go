@@ -182,14 +182,12 @@ func do_hash(key string, value map[string]interface{}, patch string, expire int6
 	case "hash_set": //临时set以便于保持session持续可读,此方法不会写入本地文件
 		fallthrough
 	case "hset":
-
 		patch_v_i, ok := hashcache.Load(patch)
 		if !ok {
-			patch_v.Store(key, Hashvalue{patch: patch, key: key})
 			hashcache.Store(patch, patch_v)
-		} else {
-			patch_v = patch_v_i.(sync.Map)
+			patch_v_i, _ = hashcache.Load(patch)
 		}
+		patch_v = patch_v_i.(sync.Map)
 		value_v_i, ok := patch_v.Load(key)
 		if !ok {
 			value_v = Hashvalue{patch: patch, key: key}
@@ -296,11 +294,11 @@ func do_hash(key string, value map[string]interface{}, patch string, expire int6
 		} else {
 			expire = -1
 		}
-
 		//赋值，写入持久化
 		value_v.time = expire
 		tmp_witre.time = expire
 		patch_v.Store(key, value_v)
+		hashcache.Store(patch, patch_v)
 		if expire > Timestampint() {
 			hashdelete[expire] = append(hashdelete[expire], map[string]string{"key": key, "patch": patch})
 		}
@@ -316,29 +314,6 @@ func do_hash(key string, value map[string]interface{}, patch string, expire int6
 			patch_v = patch_v_i.(sync.Map)
 			patch_v.Delete(key)
 		}
-	case "hget":
-		patch_v_i, ok := hashcache.Load(patch)
-		if !ok {
-			patch_v.Store(key, Hashvalue{patch: patch, key: key})
-			hashcache.Store(patch, patch_v)
-		} else {
-			patch_v = patch_v_i.(sync.Map)
-		}
-		value_v_i, ok := patch_v.Load(key)
-		if !ok {
-			value_v = Hashvalue{patch: patch, key: key}
-		} else {
-			value_v = value_v_i.(Hashvalue)
-		}
-		if value_v.time == -1 || value_v.time > Timestampint() {
-			return value_v
-		}
-		//超时，重置value_v
-		value_v = Hashvalue{patch: patch, key: key}
-		patch_v.Store(key, value_v)
-		hashcache.Store(patch, patch_v)
-		return value_v
-		//do_hash(key, nil, patch, 0, "expire_del") //超时删除
 	case "hdel":
 		patch_v_i, ok := hashcache.Load(patch)
 		if ok {
@@ -539,7 +514,29 @@ var read sync.Mutex
 
 //hash读取
 func Hget(key string, patch string) Hashvalue {
-	return do_hash(key, nil, patch, 0, "hget")
+	var patch_v sync.Map
+	var value_v Hashvalue
+	patch_v_i, ok := hashcache.Load(patch)
+	if !ok {
+		patch_v.Store(key, Hashvalue{patch: patch, key: key})
+		hashcache.Store(patch, patch_v)
+		patch_v_i, _ = hashcache.Load(patch)
+	}
+	patch_v = patch_v_i.(sync.Map)
+	value_v_i, ok := patch_v.Load(key)
+	if !ok {
+		value_v = Hashvalue{patch: patch, key: key}
+	} else {
+		value_v = value_v_i.(Hashvalue)
+	}
+	if value_v.time == -1 || value_v.time > Timestampint() {
+		return value_v
+	}
+	//超时，重置value_v
+	value_v = Hashvalue{patch: patch, key: key}
+	patch_v.Store(key, value_v)
+	hashcache.Store(patch, patch_v)
+	return value_v
 
 }
 
