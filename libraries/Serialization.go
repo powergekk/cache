@@ -41,7 +41,6 @@ func mspack_unpack(s interface{}) interface{} {
 		//err = codec.NewDecoder(strings.NewReader(s.(string)), &mh).Decode(&v)
 	case []uint8:
 		if len(s.([]uint8)) == 0 {
-			Errorlog(errors.New("内容[]uint8为空"), "msgpack反序列失败")
 			return nil
 			return nil
 		}
@@ -223,7 +222,6 @@ func json_unpack(s interface{}) interface{} {
 	}
 	if err != nil {
 		fmt.Println("json反序列失败", err)
-		Errorlog(err, "json反序列失败")
 		return nil
 	} else {
 		return v
@@ -259,7 +257,6 @@ func Unserialize_map(s interface{}, untype string) map[string]interface{} {
 	}
 	if err != nil {
 		fmt.Println("map反序列失败", err)
-		Errorlog(err, "map反序列失败,类型:"+untype+"，原文:"+src)
 		return map[string]interface{}{"errcode": "err", "errmsg": "反序列化失败"}
 	} else {
 		result := make(map[string]interface{})
@@ -293,7 +290,6 @@ func Msgpack_pack(s interface{}) string {
 	err := enc.Encode(s)
 	if err != nil {
 		fmt.Println("msgpack序列化失败", err)
-		Errorlog(err, "msgpack序列化失败")
 		return ""
 	} else {
 		return B2S(b)
@@ -310,7 +306,6 @@ func Json_pack(s interface{}) string {
 	err := enc.Encode(s)
 	if err != nil {
 		fmt.Println("json序列化失败", err)
-		Errorlog(err, "json序列化失败")
 		return ""
 	} else {
 		return B2S(b)
@@ -326,7 +321,6 @@ func Json_pack_b(s interface{}) []byte {
 	err := enc.Encode(s)
 	if err != nil {
 		fmt.Println("json序列化失败", err)
-		Errorlog(err, "json序列化失败")
 		return []byte{}
 	} else {
 		return b
@@ -343,7 +337,6 @@ func Msgpack_pack_b(s interface{}) []byte {
 	err := enc.Encode(s)
 	if err != nil {
 		fmt.Println("msgpack序列化失败", err)
-		Errorlog(err, "msgpack序列化失败")
 		return []byte{}
 	} else {
 		return b
