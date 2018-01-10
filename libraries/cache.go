@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-type Hashvalue struct { //哈希缓存结构
+type Hashvalue struct { //缓存结构
 	value sync.Map
 	time  int64  //time值说明，为0表示结果为空，为-1表示永久缓存，为正值表示以时间戳为到期时间,-2为删除key,-3为删除patch
 	patch string //本条缓存所在的patch
@@ -58,114 +58,14 @@ type hashqueue struct { //哈希队列结构
 	expire int64
 }
 
-type kvvalue struct { //kv缓存结构
-	value string
-	time  int64
-}
-
-const (
-	cache_ext = "33hao" //缓存前缀
-)
-
 var (
-	//thread int                  //线程计数
-	hashcache   sync.Map                      //哈希储存变量
-	hashcache_q []hashqueue                   //哈希写入队列
-	hashdelete  map[int64][]map[string]string //哈希待删除变量
-	kvcache     map[string]kvvalue            //kv缓存
-	kvcache_q   []map[string]kvvalue          //kv写入队列
-	h_q         sync.Mutex                    //哈希写入队列锁
-	hash_no     int                           //哈希文件序号
-	filepatch   string                        //哈希持久化文件夹
-	kv_mutex    sync.RWMutex                  //kv操作锁
+	hashcache   sync.Map                      //储存变量
+	hashcache_q []hashqueue                   //写入队列
+	hashdelete  map[int64][]map[string]string //待删除变量
+	h_q         sync.Mutex                    //写入队列锁
+	hash_no     int                           //文件序号
+	filepatch   string                        //持久化文件夹
 )
-
-//kv写入
-func Set(key string, value string, param ...int64) {
-	var expire int64
-	expire = -1
-	if len(param) == 1 {
-		expire = param[0]
-	}
-	if expire == 0 {
-		expire = -1
-	}
-	do_kv(key, value, expire, "set")
-}
-
-//kv读出
-func Get(key string) string {
-	return do_kv(key, "", 0, "get")
-}
-
-//kv删除
-func Del(key string) {
-	do_kv(key, "", 0, "del")
-}
-
-//kv操作函数
-func do_kv(key string, value string, expire int64, t string) string {
-	switch t {
-	case "get":
-		kv_mutex.RLock()
-		defer kv_mutex.RUnlock()
-		if kvcache[key].time == -1 || kvcache[key].time > Timestampint() {
-			return kvcache[key].value
-		}
-		if kvcache[key].time == 0 {
-			return ""
-		}
-		fallthrough
-	case "del":
-		kv_mutex.Lock()
-		defer kv_mutex.Unlock()
-		delete(kvcache, key)
-	case "set":
-		kv_mutex.Lock()
-		defer kv_mutex.Unlock()
-		write := false //写入标识
-		tmp := kvcache[key]
-		if expire > 0 {
-			expire = Timestampint() + expire
-		} else {
-			expire = -1
-		}
-		if tmp.value == value { //保存的值与原始值相等
-			if expire > 0 { //设置超时时间
-				tmp.time = expire
-				write = true
-			} else { //永久有效
-				if tmp.time != -1 {
-					tmp.time = -1
-					write = true
-				}
-			}
-		} else {
-			tmp.value = value
-			tmp.time = expire
-			write = true
-		}
-		if write { //赋值，写入持久化
-			kvcache[key] = tmp
-			wireteString := make(map[string]map[string]interface{})
-			for k, v := range kvcache {
-				wireteString[k] = make(map[string]interface{})
-				wireteString[k]["value"] = v.value
-				wireteString[k]["time"] = strconv.FormatInt(v.time, 10)
-			}
-			f, err1 := os.Create(filepatch + "/kv_db.cache")
-			if err1 != nil {
-				fmt.Println(err1)
-			}
-			_, err1 = io.WriteString(f, Msgpack_pack(wireteString))
-			if err1 != nil {
-				fmt.Println(err1)
-			}
-			f.Close()
-		}
-	}
-	return ""
-}
 
 /**hash执行函数,对于读写都在此完成，加锁以免冲突
  * 写入value两种方式，map[string]interface{},sync.Map
@@ -432,8 +332,6 @@ func hash_queue(key string, value Hashvalue, patch string, expire int64, t strin
 	}
 }
 
-var read sync.Mutex
-
 //hash读取
 func Hget(key string, patch string) Hashvalue {
 	var patch_v sync.Map
@@ -663,51 +561,15 @@ func makehashfromfile(v string) bool {
 	return false
 }
 
-/*从单文件读取kv缓存数据
- *传入文件路径
- */
-func makekvfromfile(v string) bool {
-	f, err1 := os.Open(v)
-	defer f.Close()
-	if err1 != nil {
-		return false
-	}
-	b, e := ioutil.ReadAll(f)
-	if e != nil {
-		return false
-	} else {
-		result := Msgpack_unpack(b)
-
-		for key, val := range result.(map[string]interface{}) {
-			if key != "" {
-				time, err := strconv.ParseInt((val.(map[string]interface{})["time"]).(string), 10, 64)
-				if err != nil || time < -1 {
-					continue
-				}
-				if time != -1 && time < Timestampint() {
-					continue
-				}
-				kvcache[key] = kvvalue{value: (val.(map[string]interface{})["value"]).(string), time: time}
-			}
-		}
-		return true
-	}
-	return false
-}
-
 func init() {
+	list_init() //队列初始化
 	filepatch = "./cache_hash"
-	//hashcache = make(map[string]map[string]Hashvalue)
-	kvcache = make(map[string]kvvalue)
-
 	hashdelete = make(map[int64][]map[string]string)
-
 	makehashfromfile(filepatch + "/h_db.cache") //加载持久化缓存
-	makekvfromfile(filepatch + "/kv_db.cache")  //加载持久化缓存
 	makecachefromfiles()                        //加载与整理碎片缓存
-
 	go func() {
 		for true {
+			//延时999毫秒执行删除
 			time.Sleep(time.Millisecond * 999)
 			t := Timestampint()
 			go func(t int64) {
@@ -720,12 +582,406 @@ func init() {
 						}
 					}
 				}
-
-				hash_queue("", Hashvalue{}, "", 0, "sync")
-
 			}(t)
-
+		}
+	}()
+	go func() {
+		for true {
+			//延时1秒执行本地持久化写入
+			time.Sleep(time.Millisecond * 1000)
+			go hash_queue("", Hashvalue{}, "", 0, "sync")
 		}
 	}()
 
+}
+
+/**
+ * 以下内容是队列
+ **/
+
+var (
+	list_map  map[string][]interface{} //队列保存变量
+	l_q       sync.Mutex               //队列锁
+	list_chan chan int
+	wg        sync.WaitGroup
+)
+
+func list_init() {
+	list_map = make(map[string][]interface{})
+	list_chan = make(chan int, 1)
+}
+
+/**
+*将一个或多个值插入到列表的尾部(最右边)。
+*插入一个值Rpush("mylist","hello")
+*插入多个值Rpush("mylist","1","2","3")
+*插入[]interface{}切片:
+   var list []interface{}
+   list = append(list,"1")
+   list = append(list,map[string]string{"name":"luyu"})
+   list = append(list,100)
+   Rpush("mylist",list...)
+**/
+func RPUSH(key string, list ...interface{}) bool {
+	if len(list) == 0 {
+		return false
+	}
+	h_q.Lock()
+	defer h_q.Unlock()
+	list_map[key] = append(list_map[key], list...)
+	//假如有线程在等待,解锁
+	if len(list_chan) > 0 {
+		<-list_chan
+	}
+	return true
+}
+
+/**
+ *将一个或多个值插入到列表的头部(最左边)，用法同Rpush
+ **/
+func LPUSH(key string, list ...interface{}) bool {
+	if len(list) == 0 {
+		return false
+	}
+	h_q.Lock()
+	defer h_q.Unlock()
+	list_map[key] = append(list, list_map[key]...)
+	if len(list_chan) > 0 {
+		<-list_chan
+	}
+	return true
+}
+
+/**
+ *取出指定列表的第一个元素，如果列表没有元素会阻塞列表直到等待超时或发现可弹出元素为止。
+ *LPOP(list1,100)取出名字为list1的列表，没有会等待100秒
+ *LPOP(list1)取出列表,没有直接返回
+ *当ok返回值为false，则为超时取队列失败
+ */
+func LPOP(key string, timeout ...int) (result interface{}, ok bool) {
+	h_q.Lock()
+	defer func() {
+		if len(list_map[key]) == 1 {
+			list_map[key] = nil
+		} else {
+			list_map[key] = list_map[key][1:]
+		}
+		h_q.Unlock()
+	}()
+	if len(list_map[key]) > 0 {
+		result = list_map[key][0]
+		ok = true
+		return
+	} else {
+		h_q.Unlock()
+		if len(timeout) == 1 {
+			ok = true
+			result = waitchan(key, &ok, timeout[0])
+		}
+		h_q.Lock()
+	}
+	return
+}
+
+/**
+ *取出指定列表的最后一个元素，如果列表没有元素会阻塞列表直到等待超时或发现可弹出元素为止。
+ *RPOP(list1,100)取出名字为list1的列表，没有会等待100秒
+ *RPOP(list1)取出列表,没有直接返回
+ *当ok返回值为false，则为超时失败
+ */
+func RPOP(key string, timeout ...int) (result interface{}, ok bool) {
+	h_q.Lock()
+	defer func() {
+		if len(list_map[key]) == 1 {
+			list_map[key] = nil
+		} else {
+			list_map[key] = list_map[key][:len(list_map[key])-1]
+		}
+		h_q.Unlock()
+	}()
+	if len(list_map[key]) > 0 {
+		ok = true
+		result = list_map[key][len(list_map[key])-1]
+		return
+	} else {
+		h_q.Unlock()
+		if len(timeout) == 1 {
+			ok = true
+			result = waitchan(key, &ok, timeout[0])
+		}
+		h_q.Lock()
+	}
+	return
+}
+
+func waitchan(key string, ok *bool, timeout int) (result interface{}) {
+	//阻塞
+	list_chan <- 0
+	go func() {
+		//等待指定时间
+		time.Sleep(time.Second * time.Duration(timeout))
+		h_q.Lock()
+		//超时返回nil与false
+		*ok = false
+		//解锁
+		if len(list_chan) > 0 {
+			<-list_chan
+		}
+		h_q.Unlock()
+	}()
+	//尝试解锁
+	list_chan <- 0
+	h_q.Lock()
+	defer h_q.Unlock()
+	if len(list_map[key]) > 0 {
+		result = list_map[key][0]
+	}
+	//释放阻塞
+	<-list_chan
+	return
+}
+
+/**
+ * 通过索引获取队列的元素
+ * 获取失败返回nil,false
+ **/
+func LINDEX(key string, index int) (result interface{}, ok bool) {
+	h_q.Lock()
+	defer h_q.Unlock()
+	if len(list_map[key]) < index {
+		return
+	}
+	return list_map[key][index], true
+}
+
+/**
+ * 获取列表长度
+ **/
+func LLEN(key string) (int, bool) {
+	h_q.Lock()
+	defer h_q.Unlock()
+	if list_map[key] == nil {
+		return 0, false
+	}
+	return len(list_map[key]), true
+}
+
+/**
+ * 获取列表指定范围内的元素，起始元素是0
+ * 表不存在返回false
+ * LRANGE("list",2,3)取第2到3个元素
+ * LRANGE("list",5,2)如果start比stop小,调换他们的顺序，取第2到第5个元素
+ * LRANGE("list",-2,1)取第1个到倒数第2个元素,假如10个元素，等同于1,8
+ * LRANGE("list",2)如果stop为空，则取第0到2个元素
+ * LRANGE("list",-3) 取最后3个元素
+ * 假如stop超过列表长度，返回空
+ **/
+func LRANGE(key string, start int, param ...interface{}) ([]interface{}, bool) {
+	h_q.Lock()
+	defer h_q.Unlock()
+	var stop int
+	if list_map[key] == nil {
+		return nil, false
+	}
+	if len(param) == 0 {
+		if start > 0 {
+			stop = 0
+		} else {
+			stop = len(list_map[key]) - 1
+		}
+	} else {
+		switch param[0].(type) {
+		case int:
+			stop = param[0].(int)
+		}
+	}
+	if start < 0 {
+		start = len(list_map[key]) + start
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	if stop < 0 {
+		stop = len(list_map[key]) + stop
+		if stop < 0 {
+			stop = 0
+		}
+	}
+	s := start
+	if start > stop {
+		start = stop
+		stop = s
+	}
+	//最大值超过最大长度
+	if stop > len(list_map[key])-1 {
+		return nil, true
+	}
+	//起始大于最大长度,返回空
+	if start > len(list_map[key])-1 {
+		return nil, true
+	}
+	result := list_map[key][start:]
+	return result[:stop+1-start], true
+}
+
+/**
+ *根据参数 COUNT 的值，移除列表中与参数 VALUE 相等的元素。
+ *count > 0 : 从表头开始向表尾搜索，移除与 VALUE 相等的元素，数量为 COUNT 。
+ *count < 0 : 从表尾开始向表头搜索，移除与 VALUE 相等的元素，数量为 COUNT 的绝对值。
+ *count = 0 : 移除表中所有与 VALUE 相等的值。
+ */
+func LREM(key string, count int, value interface{}) bool {
+	h_q.Lock()
+	defer h_q.Unlock()
+	if list_map[key] == nil {
+		return false
+	}
+	var new_list []interface{}
+	l := count
+	if l < 0 {
+		l = l * -1
+	}
+	vv := Msgpack_pack(value)
+	if count == 0 {
+		for k, v := range list_map[key] {
+			if Msgpack_pack(v) != vv {
+				new_list = append(new_list, list_map[key][k])
+			}
+		}
+	} else if count > 0 {
+		for k, v := range list_map[key] {
+			if Msgpack_pack(v) != vv {
+				new_list = append(new_list, list_map[key][k])
+			} else {
+				l--
+				if l < 0 {
+					new_list = append(new_list, list_map[key][k])
+				}
+
+			}
+		}
+	} else if count < 0 {
+		for kk, _ := range list_map[key] {
+			k := len(list_map[key]) - kk - 1
+			if Msgpack_pack(list_map[key][k]) != vv {
+				new_list = append([]interface{}{list_map[key][k]}, new_list...)
+			} else {
+				l--
+				if l < 0 {
+					new_list = append([]interface{}{list_map[key][k]}, new_list...)
+				}
+			}
+		}
+	}
+	list_map[key] = new_list
+	return true
+}
+
+/**
+ * LTRIM 对一个列表进行修剪(trim)，就是说，让列表只保留指定区间内的元素，不在指定区间之内的元素都将被删除。
+ * start 与 stop定义参照LRANGE
+ * 设置超过最大值的start会清空列表
+ * 设置超过最大值的stop等同于最大值
+ **/
+func LTRIM(key string, start int, param ...interface{}) bool {
+	h_q.Lock()
+	defer h_q.Unlock()
+	if list_map[key] == nil {
+		return false
+	}
+	var stop int
+	if len(param) == 0 {
+		if start > 0 {
+			stop = 0
+		} else {
+			stop = len(list_map[key]) - 1
+		}
+	} else {
+		switch param[0].(type) {
+		case int:
+			stop = param[0].(int)
+		}
+	}
+	if start < 0 {
+		start = len(list_map[key]) + start
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	if stop < 0 {
+		stop = len(list_map[key]) + stop
+		if stop < 0 {
+			stop = 0
+		}
+	}
+	s := start
+	if start > stop {
+		start = stop
+		stop = s
+	}
+	//最大值超过最大长度,等同于最大值
+	if stop > len(list_map[key])-1 {
+		stop = len(list_map[key]) - 1
+	}
+	//起始大于最大长度,清空列表
+	if start > len(list_map[key])-1 {
+		list_map[key] = nil
+		return true
+	}
+	result := list_map[key][start:]
+	list_map[key] = result[:stop+1-start]
+	return true
+}
+
+func pop_test() {
+	begin := Timestampint()
+	fmt.Println("开始测试")
+	//读取左边数据等待100秒
+	//线程1
+	go func() {
+		fmt.Println(LPOP("test", 100))
+		fmt.Println("等待了", Timestampint()-begin, "秒")
+	}()
+	//线程2
+	go func() {
+		fmt.Println(LPOP("test", 100))
+		fmt.Println("等待了", Timestampint()-begin, "秒")
+	}()
+	//等5秒后再写入
+	time.Sleep(time.Second * 5)
+	fmt.Println("开始写入1")
+	RPUSH("test", "久等了")
+	//等待3秒后写入
+	time.Sleep(time.Second * 3)
+	fmt.Println("开始写入2")
+	LPUSH("test", "第二次写入")
+}
+
+func lrange_test() {
+	LPUSH("test", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+	fmt.Println(LRANGE("test", 0, 1))
+	fmt.Println(LRANGE("test", 5, 10))
+	fmt.Println(LRANGE("test", -2))
+}
+
+func lrem_test() {
+	LPUSH("test", "5", "2", "2", "3", "3", "3", "4", "5", "6", "7")
+	LREM("test", 0, "2")          //去掉所有的2
+	fmt.Println(list_map["test"]) //[5 3 3 3 4 5 6 7]
+	LREM("test", 2, "3")          //去掉左边两个3
+	fmt.Println(list_map["test"]) //[5 3 4 5 6 7]
+	LREM("test", -1, "5")         //去掉右边那个5
+	fmt.Println(list_map["test"]) //[5 3 4   6 7]
+}
+
+func ltrim_test() {
+	LPUSH("test", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+	fmt.Println(LTRIM("test", 0, 7))
+	fmt.Println(list_map["test"]) //[0 1 2 3 4 5 6 7]
+	fmt.Println(LTRIM("test", 2, 4))
+	fmt.Println(list_map["test"]) //[2 3 4]
+	fmt.Println(LTRIM("test", 10))
+	fmt.Println(list_map["test"]) //[2 3 4]
 }
