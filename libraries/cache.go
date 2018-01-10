@@ -39,12 +39,13 @@ func (this *Hashvalue) Range(f func(interface{}, interface{}) bool) {
  *使用Store方法，可以临时保存内容到缓存，重启进程失效
  **/
 func (this *Hashvalue) Store(key interface{}, value interface{}) {
-	_, ok := this.value.Load(key)
+	_, ok := this.value.LoadOrStore(key, value)
 	if !ok {
+		//临时写入以保证数据存在，如果ok是false，就是sync.Map里面没有这个值，直接进行Store，下次在读取都会一直是nil与false
 		do_hash(this.key, map[string]interface{}{key.(string): value}, this.patch, 0, "hash_set")
+	} else {
+		this.value.Store(key, value)
 	}
-	this.value.Store(key, value)
-
 }
 func (this *Hashvalue) Delete(key interface{}) {
 	this.value.Delete(key)
@@ -169,221 +170,142 @@ func do_kv(key string, value string, expire int64, t string) string {
 /**hash执行函数,对于读写都在此完成，加锁以免冲突
  * 写入value两种方式，map[string]interface{},sync.Map
  **/
-func do_hash(key string, value map[string]interface{}, patch string, expire int64, t string) (hash Hashvalue) {
+func do_hash(key string, value map[string]interface{}, patch string, expire int64, t string) {
 	//if t == "hdel" {
 	//fmt.Println(key, patch, "删除")
 	//panic("存在删除")
 	//}
 	var value_v Hashvalue
 	var patch_v sync.Map
+	patch_v_i, ok := hashcache.Load(patch)
+	if !ok {
+		patch_v.Store(key, Hashvalue{patch: patch, key: key})
+		hashcache.Store(patch, patch_v)
+	} else {
+		patch_v = patch_v_i.(sync.Map)
+	}
+	value_v_i, ok := patch_v.Load(key)
+	if !ok {
+		value_v = Hashvalue{patch: patch, key: key}
+	} else {
+		value_v = value_v_i.(Hashvalue)
+	}
+
+	var tmp_witre Hashvalue //实际要写入 更新的内容
+	//exp模式，暂时支持单+或者单—
+	if value["exp"] != nil {
+		vals := strings.Split(value["exp"].(string), ",")
+		for _, val := range vals {
+			param := strings.Split(value[val].(string), "+")
+			if len(param) > 1 {
+				t_result := 0
+				for _, v := range param {
+					//尝试从缓存取值
+					t_n, ok := value_v.value.Load(v)
+					t_num := 0
+					//初始化原始值
+					if t_n != nil && ok {
+						switch t_n.(type) {
+						case string:
+							t_num, _ = strconv.Atoi(t_n.(string))
+						case int:
+							t_num = t_n.(int)
+						case int64:
+							t_num = int(t_n.(int64))
+						}
+
+					}
+					if t_num == 0 {
+						//尝试直接转换成数字
+						t_num, _ = strconv.Atoi(v)
+					}
+					t_result += t_num
+				}
+				//增加后，保持type前后一致性
+				switch value[val].(type) {
+				case string:
+					value[val] = strconv.Itoa(t_result)
+				case nil:
+					value[val] = strconv.Itoa(t_result)
+				case int:
+					value[val] = t_result
+				case int64:
+					value[val] = int64(t_result)
+				}
+				continue
+			}
+			param = strings.Split(value[val].(string), "-")
+			if len(param) > 1 {
+				t_result := 0
+				for k, v := range param {
+					//尝试从缓存取值
+					t_n, ok := value_v.value.Load(v)
+					t_num := 0
+					//初始化原始值
+					if t_n != nil && ok {
+						switch t_n.(type) {
+						case string:
+							t_num, _ = strconv.Atoi(t_n.(string))
+						case int:
+							t_num = t_n.(int)
+						case int64:
+							t_num = int(t_n.(int64))
+						}
+
+					}
+					if t_num == 0 {
+						//尝试直接转换成数字
+						t_num, _ = strconv.Atoi(v)
+					}
+					if k == 0 {
+						t_result = t_num
+					} else {
+						t_result -= t_num
+					}
+
+				}
+				//减少后，保持type前后一致性
+				switch value[val].(type) {
+				case string:
+					value[val] = strconv.Itoa(t_result)
+				case nil:
+					value[val] = strconv.Itoa(t_result)
+				case int:
+					value[val] = t_result
+				case int64:
+					value[val] = int64(t_result)
+				}
+				continue
+			}
+
+		}
+		delete(value, "exp")
+	}
+	for k, val := range value {
+		value_v.value.Store(k, val)
+		tmp_witre.value.Store(k, val)
+	}
+	if expire > 0 {
+		expire = Timestampint() + expire
+	} else {
+		expire = -1
+	}
+
+	//赋值，写入持久化
+	value_v.time = expire
+	tmp_witre.time = expire
+	patch_v.Store(key, value_v)
+	if expire > Timestampint() {
+		hashdelete[expire] = append(hashdelete[expire], map[string]string{"key": key, "patch": patch})
+	}
 	switch t {
 	case "hset_r":
-		fallthrough
-	case "hash_set": //临时set以便于保持session持续可读,此方法不会写入本地文件
-		fallthrough
+		//即刻写入
+		hash_write(patch, key, tmp_witre)
 	case "hset":
-		patch_v_i, ok := hashcache.Load(patch)
-		if !ok {
-			hashcache.Store(patch, patch_v)
-			patch_v_i, _ = hashcache.Load(patch)
-		}
-		patch_v = patch_v_i.(sync.Map)
-		value_v_i, ok := patch_v.Load(key)
-		if !ok {
-			value_v = Hashvalue{patch: patch, key: key}
-		} else {
-			value_v = value_v_i.(Hashvalue)
-		}
-
-		var tmp_witre Hashvalue //实际要写入 更新的内容
-		//exp模式，暂时支持单+或者单—
-		if value["exp"] != nil {
-			vals := strings.Split(value["exp"].(string), ",")
-			for _, val := range vals {
-				param := strings.Split(value[val].(string), "+")
-				if len(param) > 1 {
-					t_result := 0
-					for _, v := range param {
-						//尝试从缓存取值
-						t_n, ok := value_v.value.Load(v)
-						t_num := 0
-						//初始化原始值
-						if t_n != nil && ok {
-							switch t_n.(type) {
-							case string:
-								t_num, _ = strconv.Atoi(t_n.(string))
-							case int:
-								t_num = t_n.(int)
-							case int64:
-								t_num = int(t_n.(int64))
-							}
-
-						}
-						if t_num == 0 {
-							//尝试直接转换成数字
-							t_num, _ = strconv.Atoi(v)
-						}
-						t_result += t_num
-					}
-					//增加后，保持type前后一致性
-					switch value[val].(type) {
-					case string:
-						value[val] = strconv.Itoa(t_result)
-					case nil:
-						value[val] = strconv.Itoa(t_result)
-					case int:
-						value[val] = t_result
-					case int64:
-						value[val] = int64(t_result)
-					}
-					continue
-				}
-				param = strings.Split(value[val].(string), "-")
-				if len(param) > 1 {
-					t_result := 0
-					for k, v := range param {
-						//尝试从缓存取值
-						t_n, ok := value_v.value.Load(v)
-						t_num := 0
-						//初始化原始值
-						if t_n != nil && ok {
-							switch t_n.(type) {
-							case string:
-								t_num, _ = strconv.Atoi(t_n.(string))
-							case int:
-								t_num = t_n.(int)
-							case int64:
-								t_num = int(t_n.(int64))
-							}
-
-						}
-						if t_num == 0 {
-							//尝试直接转换成数字
-							t_num, _ = strconv.Atoi(v)
-						}
-						if k == 0 {
-							t_result = t_num
-						} else {
-							t_result -= t_num
-						}
-
-					}
-					//减少后，保持type前后一致性
-					switch value[val].(type) {
-					case string:
-						value[val] = strconv.Itoa(t_result)
-					case nil:
-						value[val] = strconv.Itoa(t_result)
-					case int:
-						value[val] = t_result
-					case int64:
-						value[val] = int64(t_result)
-					}
-					continue
-				}
-
-			}
-			delete(value, "exp")
-		}
-		for k, val := range value {
-			value_v.value.Store(k, val)
-			tmp_witre.value.Store(k, val)
-		}
-		if expire > 0 {
-			expire = Timestampint() + expire
-		} else {
-			expire = -1
-		}
-		//赋值，写入持久化
-		value_v.time = expire
-		tmp_witre.time = expire
-		patch_v.Store(key, value_v)
-		hashcache.Store(patch, patch_v)
-		if expire > Timestampint() {
-			hashdelete[expire] = append(hashdelete[expire], map[string]string{"key": key, "patch": patch})
-		}
-		if t == "hset_r" {
-			hash_write(patch, key, tmp_witre)
-		} else {
-			hash_queue(key, tmp_witre, patch, expire, t)
-		}
-
-	case "expire_del":
-		patch_v_i, ok := hashcache.Load(patch)
-		if ok {
-			patch_v = patch_v_i.(sync.Map)
-			patch_v.Delete(key)
-		}
-	case "hdel":
-		patch_v_i, ok := hashcache.Load(patch)
-		if ok {
-			patch_v = patch_v_i.(sync.Map)
-			patch_v.Delete(key)
-			go hash_write(patch, key, Hashvalue{time: -2})
-		}
-	case "hdel_all":
-		_, ok := hashcache.Load(patch)
-		if ok {
-			hashcache.Delete(patch)
-			go hash_write(patch, key, Hashvalue{time: -3})
-		}
-	case "write_db":
-		//结构体无法序列化，需要转换
-		wireteString := make(map[string]map[string]map[string]interface{})
-		hashcache.Range(func(patch_i, val_i interface{}) bool {
-			patch := patch_i.(string)
-			val := val_i.(sync.Map)
-			wireteString[patch] = make(map[string]map[string]interface{})
-			val.Range(func(key_i, v_i interface{}) bool {
-				key := key_i.(string)
-				v := v_i.(Hashvalue)
-				tmp := make(map[string]string)
-				v.value.Range(func(kk, vv interface{}) bool {
-					write_string := ""
-					switch vv.(type) {
-					case string:
-						write_string = "string|" + vv.(string)
-					case int:
-						write_string = "int|" + strconv.Itoa(vv.(int))
-					case int64:
-						write_string = "int64|" + fmt.Sprintf("%d", vv)
-					case map[string]string:
-						write_string = "mps|" + Msgpack_pack(vv)
-					case map[string]interface{}:
-						write_string = "mpi|" + Msgpack_pack(vv)
-					case []string:
-						write_string = "ss|" + Msgpack_pack(vv)
-					case []map[string]string:
-						write_string = "smps|" + Msgpack_pack(vv)
-					case []map[string]interface{}:
-						write_string = "smpi|" + Msgpack_pack(vv)
-					case map[string]map[string]string:
-						write_string = "mpsmps|" + Msgpack_pack(vv)
-					case map[string]map[string]interface{}:
-						write_string = "mpsmpi|" + Msgpack_pack(vv)
-
-					}
-					tmp[kk.(string)] = write_string
-					return true
-				})
-				wireteString[patch][key] = make(map[string]interface{})
-				wireteString[patch][key]["value"] = tmp
-				wireteString[patch][key]["time"] = strconv.FormatInt(v.time, 10)
-				return true
-			})
-			return true
-		})
-		f, err1 := os.Create(filepatch + "/h_db.cache")
-		if err1 != nil {
-			fmt.Println(err1, "hash文件创建失败")
-		}
-		_, err1 = io.WriteString(f, Msgpack_pack(wireteString))
-		if err1 != nil {
-			fmt.Println(err1, "hash文件写入失败")
-		}
-		f.Close()
+		//加入写队列
+		hash_queue(key, tmp_witre, patch, expire, t)
 	}
-	return
 }
 
 /**
@@ -520,9 +442,9 @@ func Hget(key string, patch string) Hashvalue {
 	if !ok {
 		patch_v.Store(key, Hashvalue{patch: patch, key: key})
 		hashcache.Store(patch, patch_v)
-		patch_v_i, _ = hashcache.Load(patch)
+	} else {
+		patch_v = patch_v_i.(sync.Map)
 	}
-	patch_v = patch_v_i.(sync.Map)
 	value_v_i, ok := patch_v.Load(key)
 	if !ok {
 		value_v = Hashvalue{patch: patch, key: key}
@@ -533,31 +455,28 @@ func Hget(key string, patch string) Hashvalue {
 		return value_v
 	}
 	//超时，重置value_v
-	value_v = Hashvalue{patch: patch, key: key}
-	patch_v.Store(key, value_v)
+	patch_v.Store(key, Hashvalue{patch: patch, key: key})
 	hashcache.Store(patch, patch_v)
 	return value_v
-
 }
 
 //hash删除
-func Hdel(key string, patch string) bool {
-	//go func(){
-	do_hash(key, nil, patch, 0, "hdel")
-	//}()
-	return true
+func Hdel(key string, patch string) {
+	patch_v_i, ok := hashcache.Load(patch)
+	if ok {
+		patch_v := patch_v_i.(sync.Map)
+		patch_v.Delete(key)
+		go hash_write(patch, key, Hashvalue{time: -2})
+	}
 }
 
 //hash删除patch下所有key
-func Hdel_all(patch string) bool {
-	go func() {
-		do_hash("", nil, patch, 0, "hdel_all")
-	}()
-	return true
-}
-
-func test1() {
-	fmt.Println()
+func Hdel_all(patch string) {
+	_, ok := hashcache.Load(patch)
+	if ok {
+		hashcache.Delete(patch)
+		go hash_write(patch, "", Hashvalue{time: -3})
+	}
 }
 
 //将cache零散文件整合
@@ -595,7 +514,60 @@ func makecachefromfiles() {
 			}
 		}
 		if write_hash {
-			do_hash("", nil, "", 0, "write_db")
+			//结构体无法序列化，需要转换
+			wireteString := make(map[string]map[string]map[string]interface{})
+			hashcache.Range(func(patch_i, val_i interface{}) bool {
+				patch := patch_i.(string)
+				val := val_i.(sync.Map)
+				wireteString[patch] = make(map[string]map[string]interface{})
+				val.Range(func(key_i, v_i interface{}) bool {
+					key := key_i.(string)
+					v := v_i.(Hashvalue)
+					tmp := make(map[string]string)
+					v.value.Range(func(kk, vv interface{}) bool {
+						write_string := ""
+						switch vv.(type) {
+						case string:
+							write_string = "string|" + vv.(string)
+						case int:
+							write_string = "int|" + strconv.Itoa(vv.(int))
+						case int64:
+							write_string = "int64|" + fmt.Sprintf("%d", vv)
+						case map[string]string:
+							write_string = "mps|" + Msgpack_pack(vv)
+						case map[string]interface{}:
+							write_string = "mpi|" + Msgpack_pack(vv)
+						case []string:
+							write_string = "ss|" + Msgpack_pack(vv)
+						case []map[string]string:
+							write_string = "smps|" + Msgpack_pack(vv)
+						case []map[string]interface{}:
+							write_string = "smpi|" + Msgpack_pack(vv)
+						case map[string]map[string]string:
+							write_string = "mpsmps|" + Msgpack_pack(vv)
+						case map[string]map[string]interface{}:
+							write_string = "mpsmpi|" + Msgpack_pack(vv)
+
+						}
+						tmp[kk.(string)] = write_string
+						return true
+					})
+					wireteString[patch][key] = make(map[string]interface{})
+					wireteString[patch][key]["value"] = tmp
+					wireteString[patch][key]["time"] = strconv.FormatInt(v.time, 10)
+					return true
+				})
+				return true
+			})
+			f, err1 := os.Create(filepatch + "/h_db.cache")
+			if err1 != nil {
+				fmt.Println(err1, "hash文件创建失败")
+			}
+			_, err1 = io.WriteString(f, Msgpack_pack(wireteString))
+			if err1 != nil {
+				fmt.Println(err1, "hash文件写入失败")
+			}
+			f.Close()
 		}
 
 	}
@@ -741,7 +713,11 @@ func init() {
 			go func(t int64) {
 				if len(hashdelete[t]) > 0 {
 					for _, v := range hashdelete[t] {
-						go do_hash(v["key"], nil, v["patch"], 0, "expire_del")
+						patch_v_i, ok := hashcache.Load(v["patch"])
+						if ok {
+							patch_v := patch_v_i.(sync.Map)
+							patch_v.Delete(v["key"])
+						}
 					}
 				}
 
