@@ -970,3 +970,56 @@ func LTRIM(key string, start int, param ...interface{}) bool {
 	list_map[key] = result[:stop+1-start]
 	return true
 }
+
+func pop_test() {
+	begin := Timestampint() + 1
+	fmt.Println("开始测试")
+	//读取左边数据等待100秒
+	//线程1
+	go func() {
+		fmt.Println(LPOP("test", 100))
+		fmt.Println("1等待了", Timestampint()-begin, "秒")
+	}()
+	//延迟1秒执行线程2
+	time.Sleep(time.Second * 1)
+	//线程2
+	go func() {
+		fmt.Println(LPOP("test", 10))
+		fmt.Println("2等待了", Timestampint()-begin, "秒")
+	}()
+	//等5秒后再写入
+	time.Sleep(time.Second * 5)
+	fmt.Println("开始写入1")
+	RPUSH("test", "久等了")
+	//等待3秒后写入
+	time.Sleep(time.Second * 3)
+	fmt.Println("开始写入2")
+	LPUSH("test", "第二次写入")
+}
+
+func lrange_test() {
+	LPUSH("test", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+	fmt.Println(LRANGE("test", 0, 1))
+	fmt.Println(LRANGE("test", 5, 10))
+	fmt.Println(LRANGE("test", -2))
+}
+
+func lrem_test() {
+	LPUSH("test", "5", "2", "2", "3", "3", "3", "4", "5", "6", "7")
+	LREM("test", 0, "2")          //去掉所有的2
+	fmt.Println(list_map["test"]) //[5 3 3 3 4 5 6 7]
+	LREM("test", 2, "3")          //去掉左边两个3
+	fmt.Println(list_map["test"]) //[5 3 4 5 6 7]
+	LREM("test", -1, "5")         //去掉右边那个5
+	fmt.Println(list_map["test"]) //[5 3 4   6 7]
+}
+
+func ltrim_test() {
+	LPUSH("test", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+	fmt.Println(LTRIM("test", 0, 7))
+	fmt.Println(list_map["test"]) //[0 1 2 3 4 5 6 7]
+	fmt.Println(LTRIM("test", 2, 4))
+	fmt.Println(list_map["test"]) //[2 3 4]
+	fmt.Println(LTRIM("test", 10))
+	fmt.Println(list_map["test"]) //[2 3 4]
+}
