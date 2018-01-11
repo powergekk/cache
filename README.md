@@ -42,4 +42,4 @@ libraries.Hdel(key,patch)
 libraries.Hdel_all(patch)
 
 # 队列
-以redis的list为参照集成了RPUSH、LPUSH、LPOP、RPOP、LINDEX、LLEN、LRANGE、LREM、LTRIM，例子list_test.go
+以redis的list为参照集成了RPUSH、LPUSH、LPOP、RPOP、LINDEX、LLEN、LRANGE、LREM、LTRIM，例子在cache.go尾部
