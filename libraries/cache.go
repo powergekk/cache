@@ -600,15 +600,16 @@ func init() {
  **/
 
 var (
-	list_map  map[string][]interface{} //队列保存变量
-	l_q       sync.Mutex               //队列锁
-	list_chan chan int
-	wg        sync.WaitGroup
+	list_map   map[string][]interface{} //队列保存变量
+	l_q        sync.Mutex               //队列锁
+	list_chans map[string][]chan int
+	wg         sync.WaitGroup
 )
 
 func list_init() {
 	list_map = make(map[string][]interface{})
-	list_chan = make(chan int, 1)
+	list_chans = make(map[string][]chan int)
+	//pop_test()
 }
 
 /**
@@ -629,9 +630,21 @@ func RPUSH(key string, list ...interface{}) bool {
 	h_q.Lock()
 	defer h_q.Unlock()
 	list_map[key] = append(list_map[key], list...)
-	//假如有线程在等待,解锁
-	if len(list_chan) > 0 {
-		<-list_chan
+	if len(list_chans[key]) > 0 {
+		var new_chans []chan int
+		out := true
+		//整理空chan，以及对第一个正在等待的chan进行解锁
+		for _, list_chan := range list_chans[key] {
+			if len(list_chan) > 0 {
+				if out {
+					<-list_chan
+					out = false
+				} else {
+					new_chans = append(new_chans, list_chan)
+				}
+			}
+		}
+		list_chans[key] = new_chans
 	}
 	return true
 }
@@ -646,8 +659,21 @@ func LPUSH(key string, list ...interface{}) bool {
 	h_q.Lock()
 	defer h_q.Unlock()
 	list_map[key] = append(list, list_map[key]...)
-	if len(list_chan) > 0 {
-		<-list_chan
+	if len(list_chans[key]) > 0 {
+		var new_chans []chan int
+		out := true
+		//整理空chan，以及对第一个正在等待的chan进行解锁
+		for _, list_chan := range list_chans[key] {
+			if len(list_chan) > 0 {
+				if out {
+					<-list_chan
+					out = false
+				} else {
+					new_chans = append(new_chans, list_chan)
+				}
+			}
+		}
+		list_chans[key] = new_chans
 	}
 	return true
 }
@@ -661,11 +687,14 @@ func LPUSH(key string, list ...interface{}) bool {
 func LPOP(key string, timeout ...int) (result interface{}, ok bool) {
 	h_q.Lock()
 	defer func() {
-		if len(list_map[key]) == 1 {
-			list_map[key] = nil
-		} else {
-			list_map[key] = list_map[key][1:]
+		if len(list_map[key]) > 0 {
+			if len(list_map[key]) == 1 {
+				list_map[key] = nil
+			} else {
+				list_map[key] = list_map[key][1:]
+			}
 		}
+
 		h_q.Unlock()
 	}()
 	if len(list_map[key]) > 0 {
@@ -673,10 +702,14 @@ func LPOP(key string, timeout ...int) (result interface{}, ok bool) {
 		ok = true
 		return
 	} else {
+		list_chan := make(chan int, 1)
+		list_chans[key] = append(list_chans[key], list_chan)
+		//加塞
+		list_chan <- 0
 		h_q.Unlock()
 		if len(timeout) == 1 {
 			ok = true
-			result = waitchan(key, &ok, timeout[0])
+			result = waitchan(key, &ok, timeout[0], list_chan)
 		}
 		h_q.Lock()
 	}
@@ -692,10 +725,12 @@ func LPOP(key string, timeout ...int) (result interface{}, ok bool) {
 func RPOP(key string, timeout ...int) (result interface{}, ok bool) {
 	h_q.Lock()
 	defer func() {
-		if len(list_map[key]) == 1 {
-			list_map[key] = nil
-		} else {
-			list_map[key] = list_map[key][:len(list_map[key])-1]
+		if len(list_map[key]) > 0 {
+			if len(list_map[key]) == 1 {
+				list_map[key] = nil
+			} else {
+				list_map[key] = list_map[key][1:]
+			}
 		}
 		h_q.Unlock()
 	}()
@@ -704,20 +739,22 @@ func RPOP(key string, timeout ...int) (result interface{}, ok bool) {
 		result = list_map[key][len(list_map[key])-1]
 		return
 	} else {
+		list_chan := make(chan int, 1)
+		list_chans[key] = append(list_chans[key], list_chan)
+		//加塞
+		list_chan <- 0
 		h_q.Unlock()
 		if len(timeout) == 1 {
 			ok = true
-			result = waitchan(key, &ok, timeout[0])
+			result = waitchan(key, &ok, timeout[0], list_chan)
 		}
 		h_q.Lock()
 	}
 	return
 }
 
-func waitchan(key string, ok *bool, timeout int) (result interface{}) {
-	//阻塞
-	list_chan <- 0
-	go func() {
+func waitchan(key string, ok *bool, timeout int, list_chan chan int) (result interface{}) {
+	go func(list_chan chan int) {
 		//等待指定时间
 		time.Sleep(time.Second * time.Duration(timeout))
 		h_q.Lock()
@@ -728,7 +765,7 @@ func waitchan(key string, ok *bool, timeout int) (result interface{}) {
 			<-list_chan
 		}
 		h_q.Unlock()
-	}()
+	}(list_chan)
 	//尝试解锁
 	list_chan <- 0
 	h_q.Lock()
@@ -936,18 +973,20 @@ func LTRIM(key string, start int, param ...interface{}) bool {
 }
 
 func pop_test() {
-	begin := Timestampint()
+	begin := Timestampint() + 1
 	fmt.Println("开始测试")
 	//读取左边数据等待100秒
 	//线程1
 	go func() {
 		fmt.Println(LPOP("test", 100))
-		fmt.Println("等待了", Timestampint()-begin, "秒")
+		fmt.Println("1等待了", Timestampint()-begin, "秒")
 	}()
+	//延迟1秒执行线程2
+	time.Sleep(time.Second * 1)
 	//线程2
 	go func() {
-		fmt.Println(LPOP("test", 100))
-		fmt.Println("等待了", Timestampint()-begin, "秒")
+		fmt.Println(LPOP("test", 10))
+		fmt.Println("2等待了", Timestampint()-begin, "秒")
 	}()
 	//等5秒后再写入
 	time.Sleep(time.Second * 5)
